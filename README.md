@@ -10,7 +10,7 @@ Transform your financial data into actionable insights with automated processing
 
 ### 📤 **Data Upload & Processing**
 - Multi-format support (Excel: .xls, .xlsx, .xlsb, .xlsm, CSV)
-- Automatic file type detection (50+ predefined formats)
+- Automatic file type detection (120+ predefined formats)
 - Smart header recognition and standardization
 - Real-time processing with progress tracking
 
@@ -38,7 +38,7 @@ Transform your financial data into actionable insights with automated processing
 
 ### Prerequisites
 ```bash
-Python 3.8+
+Python 3.10+
 pip (Python package manager)
 ```
 
@@ -55,14 +55,7 @@ cd e-invoices-analysis
 pip install -r requirements.txt
 ```
 
-3. **Configure AWS credentials** (create `.streamlit/secrets.toml`)
-```toml
-AWS_STORAGE_BUCKET_NAME = "your-bucket-name"
-AWS_ACCESS_KEY_ID = "your-access-key"
-AWS_SECRET_ACCESS_KEY = "your-secret-key"
-```
-
-4. **Run the application**
+3. **Run the application**
 ```bash
 streamlit run main.py
 ```
