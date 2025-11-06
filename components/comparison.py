@@ -12,7 +12,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
-
+from services.report_collector import AnalysisResultsCollector
 
 class cls_Comparison:
     
@@ -177,7 +177,7 @@ class cls_Comparison:
         st.markdown(f"""
             <div style='background-color: rgb(240,248,255); padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; font-size: 20px;'>
             📅 <b>Comparison Period:</b> {date_from} → {date_to} |
-            🛒 <b>Duplicate status:</b> {', '.join(selected_duplicates)}<br>
+            🛑 <b>Duplicate status:</b> {', '.join(selected_duplicates)}<br>
             {cat1_name}: {len(df_cat1):,} records --vs-- {cat2_name}: {len(df_cat2):,} records
             </div>
         """, unsafe_allow_html=True)
@@ -260,6 +260,12 @@ class cls_Comparison:
                 'df_cat1': df_cat1,
                 'df_cat2': df_cat2
             }
+            
+            # 🆕 ADD: Store comparison results in collector for AI report
+            if 'analysis_collector' in st.session_state:
+                st.session_state.analysis_collector.add_comparison_result(
+                    group_name, cat1_name, cat2_name, comp_num, comp_txt
+                )
 
         # === Display results if exist ===
         if f'comp_results_{group_name}' not in st.session_state:
@@ -293,7 +299,7 @@ class cls_Comparison:
                         return 'background-color: #ffcccc' if v < 0 else 'background-color: #ccffcc'
                     return ''
                 st.dataframe(
-                    df_num.style.applymap(highlight_diff, subset=["Difference"]).format({
+                    df_num.style.map(highlight_diff, subset=["Difference"]).format({
                         f'Value {cat1_name}': cls_Comparison.format_numbers,
                         f'Value {cat2_name}': cls_Comparison.format_numbers,
                         'Difference': cls_Comparison.format_numbers
@@ -301,7 +307,7 @@ class cls_Comparison:
                     use_container_width=True,
                     height=250
                 )
-                st.download_button("📥 Download Numeric Comparison", df_num.to_csv(index=False), "numeric_comparison.csv", "text/csv")
+                st.download_button("📥 Download Numeric Comparison", df_num.to_csv(index=False), "numeric_comparison.csv", "text/csv", key=f"download_numeric_{group_name}")
             else:
                 st.info("ℹ️ No numeric comparison results found.")
 
@@ -320,15 +326,12 @@ class cls_Comparison:
                     df_txt = df_txt.rename(columns=rename_map)
 
                 # 2) Build counts from any 'Full_Missing in ...' columns (preferred)
-                #    For each full_col create a short column without the 'Full_' prefix containing the count.
                 def _count_from_full_col(x):
                     """Count items from the 'Full_Missing...' source robustly."""
                     if x is None or (isinstance(x, float) and pd.isna(x)):
                         return 0
-                    # If it's already a list/tuple-like, count non-empty entries
                     if isinstance(x, (list, tuple, set)):
                         return len([v for v in x if str(v).strip()])
-                    # If it's a pandas Series or numpy array, try to convert to list then count
                     try:
                         import numpy as _np
                         import pandas as _pd
@@ -337,9 +340,7 @@ class cls_Comparison:
                             return len([v for v in lst if str(v).strip()])
                     except Exception:
                         pass
-                    # If it's a string, try splitting on ';' or ',' (robust)
                     if isinstance(x, str):
-                        # Normalize separators: prefer ';' but also handle commas
                         if ";" in x:
                             parts = [p.strip() for p in x.split(";") if p.strip()]
                             return len(parts)
@@ -347,28 +348,24 @@ class cls_Comparison:
                             parts = [p.strip() for p in x.split(",") if p.strip()]
                             return len(parts)
                         else:
-                            # Single non-empty string -> 1
                             return 1 if x.strip() else 0
-                    # fallback
                     return 0
 
-                # Use 'Full_Missing in ...' columns to create counts. If none exist, fall back to existing 'Missing in ...' strings/lists.
+                # Use 'Full_Missing in ...' columns to create counts
                 full_cols = [c for c in df_txt.columns if c.startswith("Full_Missing in ")]
                 if full_cols:
-                    # create count columns
                     for full_col in full_cols:
-                        short_col = full_col.replace("Full_", "")  # e.g. "Missing in {cat}"
+                        short_col = full_col.replace("Full_", "")
                         df_txt[short_col] = df_txt[full_col].apply(_count_from_full_col)
                 else:
-                    # fallback: count existing "Missing in " columns if present
                     for c in [col for col in df_txt.columns if col.startswith("Missing in ")]:
                         df_txt[c] = df_txt[c].apply(_count_from_full_col)
 
-                # 3) Prepare display: hide Full_ columns from the on-screen table but keep them in df_full for download
+                # 3) Prepare display
                 display_cols = [c for c in df_txt.columns if not c.startswith("Full_")]
                 df_display = df_txt[display_cols].copy()
 
-                # 4) Tooltip (small, inline) explaining counts link to details in tabs 3 & 4
+                # 4) Tooltip
                 st.markdown("""
                     <div style='font-size: 12px; color: gray; margin-top: -5px;'>
                     ℹ️ The counts in "Missing in ..." columns are derived from the full lists (Full_Missing...). 
@@ -376,42 +373,35 @@ class cls_Comparison:
                     </div>
                 """, unsafe_allow_html=True)
 
-                # 5) Show the concise table and provide downloads
+                # 5) Show the concise table
                 st.dataframe(df_display, use_container_width=True, height=250)
 
-                # Download: produce a cleaned full file where Full_ prefix is removed for clarity
+                # Download
                 df_full_for_download = df_txt.copy()
-                # Rename any Full_ columns to remove the prefix for CSV clarity
                 rename_full_for_export = {c: c.replace("Full_", "") for c in df_full_for_download.columns if c.startswith("Full_")}
                 if rename_full_for_export:
                     df_full_for_download = df_full_for_download.rename(columns=rename_full_for_export)
-                st.download_button("📥 Download Categorical Comparison (Full)", df_full_for_download.to_csv(index=False), "text_comparison_full.csv", "text/csv")
+                st.download_button("📥 Download Categorical Comparison (Full)", df_full_for_download.to_csv(index=False), "text_comparison_full.csv", "text/csv", key=f"download_categorical_{group_name}")
             else:
                 st.info("ℹ️ No text/categorical comparison results available.")
 
-        # === TAB 3 & TAB 4: build missing item details (unchanged logic, but kept here for completeness) ===
-        # Build missing lists (only when comp_txt available)
+        # === TAB 3 & TAB 4: build missing item details ===
         missing_1in2, missing_2in1 = [], []
         if comp_txt:
             for row in comp_txt:
-                # note: comp_txt rows are dict-like; keys may include "Field Category 1", "Field Category 2",
-                # and also "Full_Missing in {cat}" keys. We will guard access carefully.
                 f1 = row.get("Field Category 1") or row.get("Field in " + cat1_name) or row.get("Field in " + cat1_name, "")
                 f2 = row.get("Field Category 2") or row.get("Field in " + cat2_name) or row.get("Field in " + cat2_name, "")
 
-                # find full missing keys (explicit)
                 full_key_in_2 = f"Full_Missing in {cat2_name}"
                 full_key_in_1 = f"Full_Missing in {cat1_name}"
 
-                # Missing from cat2 (items present in cat1 but not in cat2)
+                # Missing from cat2
                 miss_in_2 = row.get(full_key_in_2, "") or row.get(f"Missing in {cat2_name}", "")
                 if miss_in_2 and f1 in df_cat1.columns:
-                    # If miss_in_2 is a string with separators or a list, build values list
                     vals = []
                     if isinstance(miss_in_2, (list, tuple, set)):
                         vals = [str(v).strip() for v in miss_in_2 if str(v).strip()]
                     elif isinstance(miss_in_2, str):
-                        # split robustly
                         if ";" in miss_in_2:
                             vals = [v.strip() for v in miss_in_2.split(";") if v.strip()]
                         elif "," in miss_in_2:
@@ -431,7 +421,7 @@ class cls_Comparison:
                             sub["Present_In"] = cat1_name
                             missing_1in2.append(sub)
 
-                # Missing from cat1 (items present in cat2 but not in cat1)
+                # Missing from cat1
                 miss_in_1 = row.get(full_key_in_1, "") or row.get(f"Missing in {cat1_name}", "")
                 if miss_in_1 and f2 in df_cat2.columns:
                     vals = []
@@ -457,11 +447,16 @@ class cls_Comparison:
                             sub["Present_In"] = cat2_name
                             missing_2in1.append(sub)
 
+        # 🆕 ADD: Store missing items summary in collector for AI report
+        if (missing_1in2 or missing_2in1) and 'analysis_collector' in st.session_state:
+            st.session_state.analysis_collector.add_missing_items_summary(
+                group_name, cat1_name, cat2_name, missing_1in2, missing_2in1
+            )
+
         # TAB 3: Category 1 missing in Category 2
         with tab3:
             if missing_1in2:
                 df_a = pd.concat(missing_1in2, ignore_index=True)
-                # optional helper sorting if available
                 try:
                     df_a = cls_Comparison.fn_sort_by_month(df_a)
                 except Exception:
@@ -471,7 +466,6 @@ class cls_Comparison:
                 fields_str = ", ".join(unique_fields) if len(unique_fields) <= 3 else f"{', '.join(unique_fields[:3])} (+{len(unique_fields)-3} more)"
                 st.markdown(f"### 📉 {fields_str} of {cat1_name} Missing in {cat2_name}")
 
-                # Filters with unique keys
                 col1, col2, col3 = st.columns(3)
                 years = sorted(df_a["Year"].dropna().unique(), reverse=True)
                 month_order = cls_Comparison.fn_get_month_order() if hasattr(cls_Comparison, "fn_get_month_order") else None
@@ -497,7 +491,6 @@ class cls_Comparison:
                     pass
                 df_filtered = df_filtered.sort_values(['Year', 'Month_Name'], ascending=[False, True])
 
-                # Totals summary (numeric columns)
                 numeric_cols = df_filtered.select_dtypes(include=[np.number]).columns.tolist()
                 exclude_cols = ['Month', 'Year', 'Comparison_Field', 'Day', 'Days', 'YEAR', 'MONTH', 'DAY']
                 numeric_cols = [col for col in numeric_cols if col not in exclude_cols and not col.startswith('Unnamed') and 'year' not in col.lower() and 'month' not in col.lower() and 'day' not in col.lower()]
@@ -507,9 +500,10 @@ class cls_Comparison:
                     totals_dict = {'Number': len(df_filtered)}
                     for col in numeric_cols:
                         total = df_filtered[col].sum()
-                        totals_dict[col] = total
+                        # Ensure numeric type for proper formatting
+                        totals_dict[col] = float(total) if pd.notna(total) else 0
 
-                    total_cols = st.columns(min(len(totals_dict), 5))
+                    total_cols = st.columns(min(len(totals_dict), 7))
                     for idx, (col_name, total_value) in enumerate(totals_dict.items()):
                         with total_cols[idx % len(total_cols)]:
                             if col_name == 'Number':
@@ -520,7 +514,18 @@ class cls_Comparison:
                                     </div>
                                 """, unsafe_allow_html=True)
                             else:
-                                formatted_value = cls_Comparison.format_numbers(total_value) if hasattr(cls_Comparison, "format_numbers") else f"{total_value:,}"
+                                # Force consistent formatting with 0 decimals for all numeric values
+                                try:
+                                    numeric_val = float(total_value)
+                                    if numeric_val < 0:
+                                        formatted_value = f'({abs(numeric_val):,.0f})'
+                                    elif numeric_val == 0:
+                                        formatted_value = f'-'
+                                    else:
+                                        formatted_value = f'{numeric_val:,.0f}'
+                                except (ValueError, TypeError):
+                                    formatted_value = str(total_value)
+                                
                                 st.markdown(f"""
                                     <div style='background-color: #f5f5f5; padding: 8px; border-radius: 5px; text-align: center;'>
                                         <div style='font-size: 12px; color: #666;'>{col_name}</div>
@@ -530,7 +535,7 @@ class cls_Comparison:
                     st.markdown("""<div style="border-top: 1px dashed #ccc; margin: 10px 0;"></div>""", unsafe_allow_html=True)
 
                 st.dataframe(df_filtered, use_container_width=True, height=400)
-                st.download_button("📥 Download Missing Items (Filtered)", df_filtered.to_csv(index=False), f"missing_{cat1_name}_in_{cat2_name}.csv", "text/csv")
+                st.download_button("📥 Download Missing Items (Filtered)", df_filtered.to_csv(index=False), f"missing_{cat1_name}_in_{cat2_name}.csv", "text/csv", key=f"download_missing_1in2_{group_name}")
             else:
                 st.info(f"✅ No items from {cat1_name} missing in {cat2_name}.")
 
@@ -581,7 +586,8 @@ class cls_Comparison:
                     totals_dict = {'Number': len(df_filtered)}
                     for col in numeric_cols:
                         total = df_filtered[col].sum()
-                        totals_dict[col] = total
+                        # Ensure numeric type for proper formatting
+                        totals_dict[col] = float(total) if pd.notna(total) else 0
 
                     total_cols = st.columns(min(len(totals_dict), 5))
                     for idx, (col_name, total_value) in enumerate(totals_dict.items()):
@@ -594,7 +600,16 @@ class cls_Comparison:
                                     </div>
                                 """, unsafe_allow_html=True)
                             else:
-                                formatted_value = cls_Comparison.format_numbers(total_value) if hasattr(cls_Comparison, "format_numbers") else f"{total_value:,}"
+                                # Force consistent formatting with 0 decimals for all numeric values
+                                try:
+                                    numeric_val = float(total_value)
+                                    if numeric_val < 0:
+                                        formatted_value = f'({abs(numeric_val):,.0f})'
+                                    else:
+                                        formatted_value = f'{numeric_val:,.0f}'
+                                except (ValueError, TypeError):
+                                    formatted_value = str(total_value)
+                                
                                 st.markdown(f"""
                                     <div style='background-color: #f5f5f5; padding: 8px; border-radius: 5px; text-align: center;'>
                                         <div style='font-size: 12px; color: #666;'>{col_name}</div>
@@ -604,17 +619,21 @@ class cls_Comparison:
                     st.markdown("""<div style="border-top: 1px dashed #ccc; margin: 10px 0;"></div>""", unsafe_allow_html=True)
 
                 st.dataframe(df_filtered, use_container_width=True, height=400)
-                st.download_button("📥 Download Missing Items (Filtered)", df_filtered.to_csv(index=False), f"missing_{cat2_name}_in_{cat1_name}.csv", "text/csv")
+                st.download_button("📥 Download Missing Items (Filtered)", df_filtered.to_csv(index=False), f"missing_{cat2_name}_in_{cat1_name}.csv", "text/csv", key=f"download_missing_2in1_{group_name}")
             else:
                 st.info(f"✅ No items from {cat2_name} missing in {cat1_name}.")
-
-
-
+   
+   
     @staticmethod
     def fn_compare_groups():
         """Trigger comparison of categories within the same FINANCIAL STATEMENT GROUP using TABS."""
 
         cls_Comparison.fn_init()
+
+        # 🆕 Initialize results collector
+        if 'analysis_collector' not in st.session_state:
+            st.session_state.analysis_collector = AnalysisResultsCollector()
+        collector = st.session_state.analysis_collector
 
         if "comparison_triggered" not in st.session_state:
             st.session_state.comparison_triggered = False
@@ -665,7 +684,9 @@ class cls_Comparison:
             if "file_metadata" not in st.session_state or not st.session_state.file_metadata:
                 st.warning("No data available for comparison.")
                 return
-            
+            # 🆕 Capture metadata
+            collector.set_metadata(st.session_state.file_metadata)
+
             data_groups = {}
 
             # 🟢 Organize Data by Group & Category
@@ -695,11 +716,18 @@ class cls_Comparison:
 
             int_countgroups = 1
             for group, categories in data_groups.items():
+                # 🆕 Capture group summary
+                collector.add_group_summary(group, categories)        
+
                 st.markdown(f"### 📌 {int_countgroups}- {group} data : {len(categories)} categories")
 
                 # 🟢 Apply "Duplicate Status" Calculation at Group Level BEFORE Filtering
                 for category in categories:
-                    categories[category] = filehandler.fn_check_duplicatedrecords(categories[category], category)
+                    df_with_dups = filehandler.fn_check_duplicatedrecords(categories[category], category)
+                    categories[category] = df_with_dups 
+
+                    # 🆕 Capture duplicate summary
+                    collector.add_duplicate_summary(group, category, df_with_dups)
 
                 with st.expander(f"Group: {group}", expanded=True):
 

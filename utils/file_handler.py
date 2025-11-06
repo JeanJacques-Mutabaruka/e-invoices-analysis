@@ -12,12 +12,11 @@ import pyxlsb
 import ast
 import re
 from io import BytesIO
-from typing import Dict, Optional, Tuple
 from openpyxl.styles import Color, PatternFill, Font, Border, Alignment
 from openpyxl.utils.exceptions import IllegalCharacterError
 from datetime import datetime, timedelta
-from datetime import datetime
 
+from typing import List, Dict, Tuple, Optional
 # NEW:
 # Get project root (2 levels up from utils/)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +26,297 @@ str_my_AWS_STORAGE_BUCKET_NAME = st.secrets["AWS_STORAGE_BUCKET_NAME"]
 str_my_AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
 str_my_AWS_SECRET_ACCESS_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
 
+# ============================================================================
+# UTILITY FUNCTIONS TO ADD TO cls_Customfiles_Filetypehandler CLASS
+# ============================================================================
+
+def add_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add YEAR, MONTH, DAY, YEAR-MONTH columns from TRANSACTION DATE
+    Case-insensitive column search
+    
+    Args:
+        df: DataFrame with TRANSACTION DATE column
+        
+    Returns:
+        DataFrame with added date columns
+    """
+    # Find TRANSACTION DATE column (case insensitive)
+    date_col = None
+    for col in df.columns:
+        if col.upper().strip() == 'TRANSACTION DATE':
+            date_col = col
+            break
+    
+    if date_col is None:
+        print("⚠️ Warning: TRANSACTION DATE column not found")
+        return df
+    
+    try:
+        # Convert to datetime
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        
+        # Add new columns
+        df['YEAR'] = df[date_col].dt.strftime('%Y')
+        df['MONTH'] = df[date_col].dt.strftime('%b')  # MMM format (Jan, Feb, etc.)
+        df['DAY'] = df[date_col].dt.strftime('%d')
+        df['YEAR-MONTH'] = df[date_col].dt.strftime('%Y-%m')
+        
+        print(f"✅ Added date columns: YEAR, MONTH, DAY, YEAR-MONTH")
+        
+    except Exception as e:
+        print(f"⚠️ Warning: Could not add date columns: {e}")
+    
+    return df
+
+def check_duplicate_status_column(df: pd.DataFrame) -> Tuple[bool, pd.DataFrame]:
+    """
+    Check if Duplicate Status column exists (case insensitive)
+    
+    Args:
+        df: DataFrame to check
+        
+    Returns:
+        Tuple of (column_exists: bool, dataframe with standardized column name)
+    """
+    # Find Duplicate Status column (case insensitive)
+    dup_status_col = None
+    for col in df.columns:
+        if col.upper().strip() == 'DUPLICATE STATUS':
+            dup_status_col = col
+            break
+    
+    if dup_status_col is None:
+        return False, df
+    
+    # Standardize column name if it exists but with different case
+    if dup_status_col != 'Duplicate Status':
+        df = df.rename(columns={dup_status_col: 'Duplicate Status'})
+    
+    return True, df
+
+def get_numeric_columns(df: pd.DataFrame, exclude_patterns: List[str] = None) -> List[str]:
+    """
+    Get list of numeric columns excluding certain patterns
+    
+    Args:
+        df: DataFrame to analyze
+        exclude_patterns: List of patterns to exclude (default: JJ's exclusion list)
+        
+    Returns:
+        List of numeric column names
+    """
+    if exclude_patterns is None:
+        # Use JJ's specified exclusion list
+        exclude_patterns = ['ID', 'LINE NUMBER', 'INVOICE NUMBER', 'RECEIPT NUMBER', 
+                          'YEAR', 'MONTH', 'DAY', 'LINE_NUMBER']
+    
+    numeric_cols = []
+    for col in df.columns:
+        # Check if column is numeric
+        if pd.api.types.is_numeric_dtype(df[col]):
+            # Check if column name contains any exclusion pattern
+            col_upper = col.upper()
+            should_exclude = False
+            
+            for pattern in exclude_patterns:
+                if pattern.upper() in col_upper:
+                    should_exclude = True
+                    break
+            
+            if not should_exclude:
+                numeric_cols.append(col)
+    
+    return numeric_cols
+
+def format_date_for_display(date_val) -> str:
+    """
+    Format date in dd-mmm-yyyy format
+    
+    Args:
+        date_val: Date value (datetime, string, or timestamp)
+        
+    Returns:
+        Formatted date string
+    """
+    try:
+        if pd.isna(date_val):
+            return "N/A"
+        
+        if isinstance(date_val, str):
+            date_val = pd.to_datetime(date_val, errors='coerce')
+        
+        if pd.isna(date_val):
+            return "N/A"
+        
+        return date_val.strftime('%d-%b-%Y')
+    
+    except:
+        return "N/A"
+
+def get_date_range(df: pd.DataFrame) -> Tuple[str, str]:
+    """
+    Get date range from TRANSACTION DATE column
+    
+    Args:
+        df: DataFrame with TRANSACTION DATE
+        
+    Returns:
+        Tuple of (start_date, end_date) formatted as dd-mmm-yyyy
+    """
+    # Find TRANSACTION DATE column (case insensitive)
+    date_col = None
+    for col in df.columns:
+        if col.upper().strip() == 'TRANSACTION DATE':
+            date_col = col
+            break
+    
+    if date_col is None:
+        return "N/A", "N/A"
+    
+    try:
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        valid_dates = df[date_col].dropna()
+        
+        if valid_dates.empty:
+            return "N/A", "N/A"
+        
+        start_date = format_date_for_display(valid_dates.min())
+        end_date = format_date_for_display(valid_dates.max())
+        
+        return start_date, end_date
+    
+    except:
+        return "N/A", "N/A"
+
+
+class ComparisonRulesManager:
+    """
+    Manages comparison rules loaded from FINDAP_Filetypes_Parameters.xlsx
+    Note: For Phase 1, comparison rules between categories are NOT implemented yet.
+    This class is prepared for future use when cross-category comparisons are enabled.
+    """
+    
+    df_comparison_rules = None
+    df_duplicate_config = None
+    df_numeric_config = None
+    df_auto_analysis_config = None
+    rules_loaded = False
+    
+    @classmethod
+    def load_comparison_rules(cls):
+        """Load all comparison-related configurations from parameter file"""
+        if cls.rules_loaded:
+            return
+        
+        try:
+            # Note: This will be used in future phases for cross-category comparisons
+            # For now, we're focusing on single category analysis
+            
+            # Import here to avoid circular imports
+            from utils.file_handler import cls_Customfiles_Filetypehandler
+            
+            # Load parameters if not already loaded
+            cls_Customfiles_Filetypehandler.load_parameters()
+            
+            param_file = cls_Customfiles_Filetypehandler.str_local_filepath
+            
+            # Load comparison rules (for future use)
+            try:
+                cls.df_comparison_rules = pd.read_excel(
+                    param_file, 
+                    sheet_name='COMPARISON', 
+                    na_filter=False
+                )
+                # Filter only enabled rules
+                cls.df_comparison_rules = cls.df_comparison_rules[
+                    cls.df_comparison_rules['ENABLED'].astype(str).str.upper() == 'TRUE'
+                ]
+                # Sort by priority
+                cls.df_comparison_rules = cls.df_comparison_rules.sort_values('PRIORITY')
+                
+            except Exception as e:
+                print(f"Info: COMPARISON sheet not found (will be used in future phases): {e}")
+                cls.df_comparison_rules = pd.DataFrame()
+            
+            # Load numeric fields config
+            try:
+                cls.df_numeric_config = pd.read_excel(
+                    param_file,
+                    sheet_name='NUMERIC_FIELDS_CONFIG',
+                    na_filter=False
+                )
+            except Exception as e:
+                print(f"Info: NUMERIC_FIELDS_CONFIG sheet not found, using defaults: {e}")
+                cls.df_numeric_config = pd.DataFrame()
+            
+            # Load auto-analysis config
+            try:
+                cls.df_auto_analysis_config = pd.read_excel(
+                    param_file,
+                    sheet_name='AUTO_ANALYSIS_CONFIG',
+                    na_filter=False
+                )
+            except Exception as e:
+                print(f"Info: AUTO_ANALYSIS_CONFIG sheet not found, using defaults: {e}")
+                cls.df_auto_analysis_config = pd.DataFrame()
+            
+            cls.rules_loaded = True
+            print(f"✅ Configuration loaded successfully")
+            
+        except Exception as e:
+            print(f"Warning: Error loading analysis configuration: {e}")
+            cls.df_comparison_rules = pd.DataFrame()
+    
+    @classmethod
+    def get_numeric_field_config(cls) -> Tuple[List[str], List[str]]:
+        """
+        Get numeric field configuration
+        
+        Returns:
+            Tuple of (include_patterns, exclude_fields)
+        """
+        cls.load_comparison_rules()
+        
+        if cls.df_numeric_config.empty:
+            # Default configuration as specified by JJ
+            include = ['AMOUNT', 'VAT', 'TOTAL', 'TAXABLE', 'TAX', 'GROSS', 'NET']
+            exclude = ['ID', 'LINE NUMBER', 'INVOICE NUMBER', 'RECEIPT NUMBER', 
+                      'YEAR', 'MONTH', 'DAY', 'LINE_NUMBER']
+            return include, exclude
+        
+        include = cls.df_numeric_config[
+            cls.df_numeric_config['ACTION'] == 'INCLUDE'
+        ]['FIELD_PATTERN'].tolist()
+        
+        exclude = cls.df_numeric_config[
+            cls.df_numeric_config['ACTION'] == 'EXCLUDE'
+        ]['FIELD_PATTERN'].tolist()
+        
+        return include, exclude
+    
+    @classmethod
+    def should_run_auto_analysis(cls) -> bool:
+        """Check if automatic analysis is enabled"""
+        cls.load_comparison_rules()
+        
+        if cls.df_auto_analysis_config.empty:
+            return True  # Default: enabled
+        
+        # Get first row (global config)
+        config = cls.df_auto_analysis_config.iloc[0]
+        return str(config.get('ENABLED', 'TRUE')).upper() == 'TRUE'
+    
+    @classmethod
+    def get_auto_analysis_depth(cls) -> str:
+        """Get configured analysis depth"""
+        cls.load_comparison_rules()
+        
+        if cls.df_auto_analysis_config.empty:
+            return 'standard'
+        
+        config = cls.df_auto_analysis_config.iloc[0]
+        return config.get('ANALYSIS_DEPTH', 'standard').lower()
 
 class cls_Aws_ParamfileHandler:
 	"""
@@ -157,9 +447,9 @@ class cls_Customfiles_Filetypehandler:
 				
 				str_local_filepath = os.path.normpath(os.path.join(str_my_MEDIA_ROOT, cls.str_param_filename))
 				cls_Aws_ParamfileHandler.get_fromaws_findap_filetypesparams(cls_Customfiles_Filetypehandler.str_param_folder,
-												   cls_Customfiles_Filetypehandler.str_param_filename,
-												   str_local_filepath
-												   )
+												cls_Customfiles_Filetypehandler.str_param_filename,
+												str_local_filepath
+												)
 				cls.dic_filesparams_dfs = pd.read_excel(str_local_filepath, sheet_name=None, na_filter=False, engine="openpyxl")
 
 				cls.df_Original_headers = cls.dic_filesparams_dfs["FileHeaders"]
@@ -870,8 +1160,8 @@ class cls_Customfiles_Filetypehandler:
 
 		# Step 3: Update lst_matching_columns to include the new columns
 		lst_matching_columns = ['ITEM CODE', 'ITEM NAME', 'QUANTITY', 'UNIT PRICE', 'BUYER TIN','SDC ID', 'VAT AMOUNT',
-						  'AMOUNT VAT INCLUDED', 'VAT AMOUNT_by_MRC NUMBER', 'AMOUNT VAT INCLUDED_by_MRC NUMBER'
-						  ]
+						'AMOUNT VAT INCLUDED', 'VAT AMOUNT_by_MRC NUMBER', 'AMOUNT VAT INCLUDED_by_MRC NUMBER'
+						]
 
 		# Step 4: Extract rows for "NR" and "NS"
 		df_rows_NR = df_dataset[df_dataset['OPERATION TYPE'] == 'NR'].copy()
@@ -1302,4 +1592,53 @@ class cls_Customfiles_Filetypehandler:
 			file_name=filename,
 			mime=mime
 		)
+
+	# ============================================================================
+	# METHODS TO ADD TO cls_Customfiles_Filetypehandler CLASS
+	# ============================================================================
+
+	@classmethod
+	def get_financial_statement_groups(cls) -> Dict[str, str]:
+		"""
+		Get mapping of categories to financial statement groups
+		
+		Returns:
+			Dictionary {category: financial_statement_group}
+		"""
+		cls.load_parameters()
+		
+		if cls.df_Categoriesparams.empty:
+			return {}
+		
+		# Check if FINANCIAL STATEMENT GROUP column exists
+		if 'FINANCIAL STATEMENT GROUP' not in cls.df_Categoriesparams.columns:
+			print("⚠️ Warning: FINANCIAL STATEMENT GROUP column not found in Categories_sheetnames")
+			return {}
+		
+		return dict(zip(
+			cls.df_Categoriesparams['CATEGORY'],
+			cls.df_Categoriesparams['FINANCIAL STATEMENT GROUP']
+		))
+
+	@classmethod
+	def get_categories_by_group(cls, group_name: str) -> List[str]:
+		"""
+		Get all categories belonging to a financial statement group
+		
+		Args:
+			group_name: Financial statement group name
+		
+		Returns:
+			List of category names
+		"""
+		cls.load_parameters()
+		
+		if cls.df_Categoriesparams.empty:
+			return []
+		
+		if 'FINANCIAL STATEMENT GROUP' not in cls.df_Categoriesparams.columns:
+			return []
+		
+		mask = cls.df_Categoriesparams['FINANCIAL STATEMENT GROUP'] == group_name
+		return cls.df_Categoriesparams[mask]['CATEGORY'].tolist()
 
